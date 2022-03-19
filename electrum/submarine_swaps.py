@@ -99,7 +99,6 @@ def create_claim_tx(
         txin: PartialTxInput,
         witness_script: bytes,
         preimage: Union[bytes, int],  # 0 if timing out forward-swap
-        privkey: bytes,
         address: str,
         amount_sat: int,
         locktime: int,
@@ -117,10 +116,7 @@ def create_claim_tx(
     txin.witness_script = witness_script
     txout = PartialTxOutput.from_address_and_value(address, amount_sat)
     tx = PartialTransaction.from_io([txin], [txout], version=2, locktime=locktime)
-    #tx.set_rbf(True)
-    sig = bytes.fromhex(tx.sign_txin(0, privkey))
-    witness = [sig, preimage, witness_script]
-    txin.witness = bytes.fromhex(construct_witness(witness))
+    tx.set_rbf(True)
     return tx
 
 
@@ -201,17 +197,12 @@ class SwapManager(Logger):
                 txin=txin,
                 witness_script=swap.redeem_script,
                 preimage=preimage,
-                privkey=swap.privkey,
                 address=address,
                 amount_sat=amount_sat,
                 locktime=locktime,
             )
+            self.sign_tx(tx, swap)
             await self.network.broadcast_transaction(tx)
-            # save txid
-            if swap.is_reverse:
-                swap.spending_txid = tx.txid()
-            else:
-                self.wallet.set_label(tx.txid(), 'Swap refund')
 
     def get_claim_fee(self):
         return self.wallet.config.estimate_fee(136, allow_fallback_to_static_rates=True)
@@ -541,3 +532,32 @@ class SwapManager(Logger):
         if is_reverse and send_amount is not None:
             send_amount += self.get_claim_fee()
         return send_amount
+
+    def get_swap_by_tx(self, tx):
+        txin = tx.inputs()[0]
+        # FIXME: not clear when TxInput has address
+        if hasattr(txin, 'address'):
+            for key, swap in self.swaps.items():
+                if txin.address == swap.lockup_address:
+                    return swap
+        else:
+            witness_script = txin.witness_elements()[-1]
+            for key, swap in self.swaps.items():
+                if witness_script == swap.redeem_script:
+                    return swap
+
+    def sign_tx(self, tx, swap):
+        preimage = swap.preimage if swap.is_reverse else 0
+        witness_script = swap.redeem_script
+        txin = tx.inputs()[0]
+        txin.script_type = 'p2wsh'
+        txin.script_sig = b''
+        txin.witness_script = witness_script
+        sig = bytes.fromhex(tx.sign_txin(0, swap.privkey))
+        witness = [sig, preimage, witness_script]
+        txin.witness = bytes.fromhex(construct_witness(witness))
+        # save txid
+        if swap.is_reverse:
+            swap.spending_txid = tx.txid()
+        #else:
+        #    self.wallet.set_label(tx.txid(), 'Swap refund')
