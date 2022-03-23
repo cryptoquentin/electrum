@@ -764,7 +764,6 @@ class AddressSynchronizer(Logger):
                     sent[txi] = height
         return received, sent
 
-
     def get_addr_outputs(self, address: str) -> Dict[TxOutpoint, PartialTxInput]:
         coins, spent = self.get_addr_io(address)
         out = {}
@@ -776,6 +775,41 @@ class AddressSynchronizer(Logger):
             utxo._trusted_value_sats = value
             utxo.block_height = tx_height
             utxo.spent_height = spent.get(prevout_str, None)
+            out[prevout] = utxo
+        return out
+
+    def get_addr_io2(self, address):
+        with self.lock, self.transaction_lock:
+            h = self.get_address_history(address)
+            received = {}
+            sent = {}
+            for tx_hash, height in h:
+                d = self.db.get_txo_addr(tx_hash, address)
+                for n, (v, is_cb) in d.items():
+                    received[tx_hash + ':%d'%n] = (height, v, is_cb)
+            for tx_hash, height in h:
+                l = self.db.get_txi_addr(tx_hash, address)
+                for txi, v in l:
+                    sent[txi] = tx_hash, height
+        return received, sent
+
+    def get_addr_outputs2(self, address: str) -> Dict[TxOutpoint, PartialTxInput]:
+        coins, spent = self.get_addr_io2(address)
+        out = {}
+        for prevout_str, v in coins.items():
+            tx_height, value, is_cb = v
+            prevout = TxOutpoint.from_str(prevout_str)
+            utxo = PartialTxInput(prevout=prevout, is_coinbase_output=is_cb)
+            utxo._trusted_address = address
+            utxo._trusted_value_sats = value
+            utxo.block_height = tx_height
+            if prevout_str in spent:
+                txid, height = spent[prevout_str]
+                utxo.spent_txid = txid
+                utxo.spent_height = height
+            else:
+                utxo.spent_txid = None
+                utxo.spent_height = None
             out[prevout] = utxo
         return out
 

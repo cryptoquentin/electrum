@@ -165,21 +165,23 @@ class SwapManager(Logger):
             return
         current_height = self.network.get_local_height()
         delta = current_height - swap.locktime
-        if not swap.is_reverse and delta < 0:
-            # too early for refund
-            return
-        txos = self.lnwatcher.get_addr_outputs(swap.lockup_address)
+        txos = self.lnwatcher.get_addr_outputs2(swap.lockup_address)
         for txin in txos.values():
             if swap.is_reverse and txin.value_sats() < swap.onchain_amount:
                 self.logger.info('amount too low, we should not reveal the preimage')
                 continue
+            swap.funding_txid = txin.prevout.txid.hex()
             spent_height = txin.spent_height
             if spent_height is not None:
+                swap.spending_txid = txin.spent_txid
                 if spent_height > 0 and current_height - spent_height > REDEEM_AFTER_DOUBLE_SPENT_DELAY:
                     self.logger.info(f'stop watching swap {swap.lockup_address}')
                     self.lnwatcher.remove_callback(swap.lockup_address)
                     swap.is_redeemed = True
                 continue
+            if not swap.is_reverse and delta < 0:
+                # too early for refund
+                return
             # FIXME the mining fee should depend on swap.is_reverse.
             #       the txs are not the same size...
             amount_sat = txin.value_sats() - self.get_claim_fee()
@@ -298,7 +300,7 @@ class SwapManager(Logger):
             dummy_output = PartialTxOutput.from_address_and_value(ln_dummy_address(), expected_onchain_amount_sat)
             tx.outputs().remove(dummy_output)
             tx.add_outputs([funding_output])
-            tx.set_rbf(False)
+            tx.set_rbf(True) # rbf must not decrease payment
             self.wallet.sign_transaction(tx, password)
         # save swap data in wallet in case we need a refund
         swap = SwapData(
@@ -312,7 +314,7 @@ class SwapManager(Logger):
             lightning_amount = lightning_amount_sat,
             is_reverse = False,
             is_redeemed = False,
-            funding_txid = tx.txid(),
+            funding_txid = None,
             spending_txid = None,
         )
         self.swaps[payment_hash.hex()] = swap
@@ -556,8 +558,3 @@ class SwapManager(Logger):
         sig = bytes.fromhex(tx.sign_txin(0, swap.privkey))
         witness = [sig, preimage, witness_script]
         txin.witness = bytes.fromhex(construct_witness(witness))
-        # save txid
-        if swap.is_reverse:
-            swap.spending_txid = tx.txid()
-        #else:
-        #    self.wallet.set_label(tx.txid(), 'Swap refund')
